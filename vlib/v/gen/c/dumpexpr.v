@@ -32,20 +32,19 @@ fn (mut g Gen) dump_expr(node ast.DumpExpr) {
 			}
 		}
 	}
-	// var.${field.name}
-	if node.expr is ast.ComptimeSelector {
+	// var.$(field.name)
+	if node.expr is ast.ComptimeSelector && node.expr.is_name {
 		if node.expr.field_expr is ast.SelectorExpr {
 			if node.expr.field_expr.expr is ast.Ident {
-				if node.expr.field_expr.expr.name == g.comptime.comptime_for_field_var
-					&& node.expr.field_expr.field_name == 'name' {
-					field, _ := g.comptime.get_comptime_selector_var_type(node.expr)
+				if node.expr.field_expr.expr.name == g.comptime.comptime_for_field_var {
+					field, _ := g.type_resolver.get_comptime_selector_var_type(node.expr)
 					name = g.styp(g.unwrap_generic(field.typ.clear_flags(.shared_f, .result)))
 					expr_type = field.typ
 				}
 			}
 		}
 	} else if node.expr is ast.Ident && node.expr.ct_expr {
-		expr_type = g.comptime.get_type(node.expr)
+		expr_type = g.type_resolver.get_type(node.expr)
 		name = g.styp(g.unwrap_generic(expr_type.clear_flags(.shared_f, .result))).replace('*',
 			'')
 	} else if node.expr is ast.SelectorExpr && node.expr.expr is ast.Ident

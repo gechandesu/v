@@ -13,7 +13,7 @@ import v.util.version
 import v.errors
 import v.pkgconfig
 import v.transformer
-import v.comptime
+import v.type_resolver
 
 // prevent stack overflows by restricting too deep recursion:
 const expr_level_cutoff_limit = 40
@@ -36,8 +36,8 @@ pub const fixed_array_builtin_methods = ['contains', 'index', 'any', 'all', 'wai
 	'sorted', 'sort_with_compare', 'sorted_with_compare', 'reverse', 'reverse_in_place', 'count']
 pub const fixed_array_builtin_methods_chk = token.new_keywords_matcher_from_array_trie(fixed_array_builtin_methods)
 // TODO: remove `byte` from this list when it is no longer supported
-pub const reserved_type_names = ['byte', 'bool', 'char', 'i8', 'i16', 'int', 'i64', 'u8', 'u16',
-	'u32', 'u64', 'f32', 'f64', 'map', 'string', 'rune', 'usize', 'isize', 'voidptr', 'thread']
+pub const reserved_type_names = ['bool', 'char', 'i8', 'i16', 'int', 'i64', 'u8', 'u16', 'u32',
+	'u64', 'f32', 'f64', 'map', 'string', 'rune', 'usize', 'isize', 'voidptr', 'thread']
 pub const reserved_type_names_chk = token.new_keywords_matcher_from_array_trie(reserved_type_names)
 pub const vroot_is_deprecated_message = '@VROOT is deprecated, use @VMODROOT or @VEXEROOT instead'
 
@@ -74,21 +74,21 @@ pub mut:
 	in_for_count                int      // if checker is currently in a for loop
 	returns                     bool
 	scope_returns               bool
-	is_builtin_mod              bool          // true inside the 'builtin', 'os' or 'strconv' modules; TODO: remove the need for special casing this
-	is_just_builtin_mod         bool          // true only inside 'builtin'
-	is_generated                bool          // true for `@[generated] module xyz` .v files
-	unresolved_return_size      []&ast.FnDecl // funcs with unresolved array fixed size e.g. fn func() [const1]int
-	inside_recheck              bool          // true when rechecking rhs assign statement
-	inside_unsafe               bool          // true inside `unsafe {}` blocks
-	inside_const                bool          // true inside `const ( ... )` blocks
-	inside_anon_fn              bool          // true inside `fn() { ... }()`
-	inside_lambda               bool          // true inside `|...| ...`
-	inside_ref_lit              bool          // true inside `a := &something`
-	inside_defer                bool          // true inside `defer {}` blocks
-	inside_return               bool          // true inside `return ...` blocks
-	inside_fn_arg               bool          // `a`, `b` in `a.f(b)`
-	inside_ct_attr              bool          // true inside `[if expr]`
-	inside_x_is_type            bool          // true inside the Type expression of `if x is Type {`
+	is_builtin_mod              bool        // true inside the 'builtin', 'os' or 'strconv' modules; TODO: remove the need for special casing this
+	is_just_builtin_mod         bool        // true only inside 'builtin'
+	is_generated                bool        // true for `@[generated] module xyz` .v files
+	unresolved_fixed_sizes      []&ast.Stmt // funcs with unresolved array fixed size e.g. fn func() [const1]int
+	inside_recheck              bool        // true when rechecking rhs assign statement
+	inside_unsafe               bool        // true inside `unsafe {}` blocks
+	inside_const                bool        // true inside `const ( ... )` blocks
+	inside_anon_fn              bool        // true inside `fn() { ... }()`
+	inside_lambda               bool        // true inside `|...| ...`
+	inside_ref_lit              bool        // true inside `a := &something`
+	inside_defer                bool        // true inside `defer {}` blocks
+	inside_return               bool        // true inside `return ...` blocks
+	inside_fn_arg               bool        // `a`, `b` in `a.f(b)`
+	inside_ct_attr              bool        // true inside `[if expr]`
+	inside_x_is_type            bool        // true inside the Type expression of `if x is Type {`
 	inside_generic_struct_init  bool
 	inside_integer_literal_cast bool // true inside `int(123)`
 	cur_struct_generic_types    []ast.Type
@@ -116,9 +116,9 @@ mut:
 	loop_labels                      []string   // filled, when inside labelled for loops: `a_label: for x in 0..10 {`
 	vweb_gen_types                   []ast.Type // vweb route checks
 	timers                           &util.Timers = util.get_timers()
-	comptime_info_stack              []comptime.ComptimeInfo // stores the values from the above on each $for loop, to make nesting them easier
-	comptime                         comptime.ComptimeInfo
-	fn_scope                         &ast.Scope = unsafe { nil }
+	type_resolver                    type_resolver.TypeResolver
+	comptime                         &type_resolver.ResolverInfo = unsafe { nil }
+	fn_scope                         &ast.Scope                  = unsafe { nil }
 	main_fn_decl_node                ast.FnDecl
 	match_exhaustive_cutoff_limit    int = 10
 	is_last_stmt                     bool
@@ -164,10 +164,8 @@ pub fn new_checker(table &ast.Table, pref_ &pref.Preferences) &Checker {
 		v_current_commit_hash:         if pref_.building_v { version.githash(pref_.vroot) or {
 				@VCURRENTHASH} } else { @VCURRENTHASH }
 	}
-	checker.comptime = &comptime.ComptimeInfo{
-		resolver: checker
-		table:    table
-	}
+	checker.type_resolver = type_resolver.TypeResolver.new(table, checker)
+	checker.comptime = &checker.type_resolver.info
 	return checker
 }
 
@@ -313,15 +311,6 @@ pub fn (mut c Checker) check_scope_vars(sc &ast.Scope) {
 	for child in sc.children {
 		c.check_scope_vars(child)
 	}
-}
-
-// not used right now
-pub fn (mut c Checker) check2(mut ast_file ast.File) []errors.Error {
-	c.change_current_file(ast_file)
-	for mut stmt in ast_file.stmts {
-		c.stmt(mut stmt)
-	}
-	return c.errors
 }
 
 pub fn (mut c Checker) change_current_file(file &ast.File) {
@@ -522,21 +511,21 @@ fn (mut c Checker) check_valid_pascal_case(name string, identifier string, pos t
 	}
 }
 
-fn (mut c Checker) type_decl(node ast.TypeDecl) {
+fn (mut c Checker) type_decl(mut node ast.TypeDecl) {
 	if node.typ == ast.invalid_type && (node is ast.AliasTypeDecl || node is ast.SumTypeDecl) {
 		typ_desc := if node is ast.AliasTypeDecl { 'alias' } else { 'sum type' }
 		c.error('cannot register ${typ_desc} `${node.name}`, another type with this name exists',
 			node.pos)
 		return
 	}
-	match node {
-		ast.AliasTypeDecl { c.alias_type_decl(node) }
-		ast.FnTypeDecl { c.fn_type_decl(node) }
-		ast.SumTypeDecl { c.sum_type_decl(node) }
+	match mut node {
+		ast.AliasTypeDecl { c.alias_type_decl(mut node) }
+		ast.FnTypeDecl { c.fn_type_decl(mut node) }
+		ast.SumTypeDecl { c.sum_type_decl(mut node) }
 	}
 }
 
-fn (mut c Checker) alias_type_decl(node ast.AliasTypeDecl) {
+fn (mut c Checker) alias_type_decl(mut node ast.AliasTypeDecl) {
 	if c.file.mod.name != 'builtin' && !node.name.starts_with('C.') {
 		c.check_valid_pascal_case(node.name, 'type alias', node.pos)
 	}
@@ -615,7 +604,11 @@ fn (mut c Checker) alias_type_decl(node ast.AliasTypeDecl) {
 				'array')
 		}
 		.array_fixed {
-			c.check_alias_vs_element_type_of_parent(node, (parent_typ_sym.info as ast.ArrayFixed).elem_type,
+			array_fixed_info := parent_typ_sym.info as ast.ArrayFixed
+			if c.array_fixed_has_unresolved_size(array_fixed_info) {
+				c.unresolved_fixed_sizes << &ast.TypeDecl(node)
+			}
+			c.check_alias_vs_element_type_of_parent(node, array_fixed_info.elem_type,
 				'fixed array')
 		}
 		.map {
@@ -667,7 +660,7 @@ fn (mut c Checker) check_any_type(typ ast.Type, sym &ast.TypeSymbol, pos token.P
 	}
 }
 
-fn (mut c Checker) fn_type_decl(node ast.FnTypeDecl) {
+fn (mut c Checker) fn_type_decl(mut node ast.FnTypeDecl) {
 	c.check_valid_pascal_case(node.name, 'fn type', node.pos)
 	typ_sym := c.table.sym(node.typ)
 	fn_typ_info := typ_sym.info as ast.FnType
@@ -688,7 +681,7 @@ fn (mut c Checker) fn_type_decl(node ast.FnTypeDecl) {
 	}
 }
 
-fn (mut c Checker) sum_type_decl(node ast.SumTypeDecl) {
+fn (mut c Checker) sum_type_decl(mut node ast.SumTypeDecl) {
 	c.check_valid_pascal_case(node.name, 'sum type', node.pos)
 	mut names_used := []string{}
 	for variant in node.variants {
@@ -1674,7 +1667,8 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 	} else if c.comptime.inside_comptime_for && typ == c.enum_data_type
 		&& node.field_name == 'value' {
 		// for comp-time enum.values
-		node.expr_type = c.comptime.type_map['${c.comptime.comptime_for_enum_var}.typ']
+		node.expr_type = c.type_resolver.get_ct_type_or_default('${c.comptime.comptime_for_enum_var}.typ',
+			node.expr_type)
 		node.typ = typ
 		return node.expr_type
 	}
@@ -1707,8 +1701,8 @@ fn (mut c Checker) selector_expr(mut node ast.SelectorExpr) ast.Type {
 	mut unknown_field_msg := ''
 	mut has_field := false
 	mut field := ast.StructField{}
-	if field_name.len > 0 && field_name[0].is_capital() && sym.info is ast.Struct
-		&& sym.language == .v {
+	if field_name.len > 0 && sym.info is ast.Struct && sym.language == .v
+		&& field_name[0].is_capital() {
 		// x.Foo.y => access the embedded struct
 		for embed in sym.info.embeds {
 			embed_sym := c.table.sym(embed)
@@ -2377,7 +2371,7 @@ fn (mut c Checker) stmt(mut node ast.Stmt) {
 			c.struct_decl(mut node)
 		}
 		ast.TypeDecl {
-			c.type_decl(node)
+			c.type_decl(mut node)
 		}
 	}
 }
@@ -2959,6 +2953,20 @@ pub fn (mut c Checker) expr(mut node ast.Expr) ast.Type {
 			if !c.is_builtin_mod {
 				c.table.used_features.as_cast = true
 			}
+			if mut node.expr is ast.Ident {
+				if mut node.expr.obj is ast.Var {
+					ident_typ := if node.expr.obj.smartcasts.len > 0 {
+						node.expr.obj.smartcasts.last()
+					} else {
+						node.expr.obj.typ
+					}
+					if !node.typ.has_flag(.option) && ident_typ.has_flag(.option)
+						&& node.expr.or_expr.kind == .absent {
+						c.error('variable `${node.expr.name}` is an Option, it must be unwrapped first',
+							node.expr.pos)
+					}
+				}
+			}
 			if expr_type_sym.kind == .sum_type {
 				c.ensure_type_exists(node.typ, node.pos)
 				if !c.table.sumtype_has_variant(c.unwrap_generic(node.expr_type), c.unwrap_generic(node.typ),
@@ -3056,9 +3064,10 @@ pub fn (mut c Checker) expr(mut node ast.Expr) ast.Type {
 			}
 			if c.comptime.inside_comptime_for && mut node.expr is ast.Ident {
 				if node.expr.ct_expr {
-					node.expr_type = c.comptime.get_type(node.expr as ast.Ident)
-				} else if (node.expr as ast.Ident).name in c.comptime.type_map {
-					node.expr_type = c.comptime.type_map[(node.expr as ast.Ident).name]
+					node.expr_type = c.type_resolver.get_type(node.expr as ast.Ident)
+				} else if (node.expr as ast.Ident).name in c.type_resolver.type_map {
+					node.expr_type = c.type_resolver.get_ct_type_or_default((node.expr as ast.Ident).name,
+						node.expr_type)
 				}
 			}
 			c.check_expr_option_or_result_call(node.expr, node.expr_type)
@@ -3348,9 +3357,10 @@ fn (mut c Checker) cast_expr(mut node ast.CastExpr) ast.Type {
 	c.inside_integer_literal_cast = old_inside_integer_literal_cast
 
 	if mut node.expr is ast.ComptimeSelector {
-		node.expr_type = c.comptime.get_comptime_selector_type(node.expr, node.expr_type)
+		node.expr_type = c.type_resolver.get_comptime_selector_type(node.expr, node.expr_type)
 	} else if node.expr is ast.Ident && c.comptime.is_comptime_variant_var(node.expr) {
-		node.expr_type = c.comptime.type_map['${c.comptime.comptime_for_variant_var}.typ']
+		node.expr_type = c.type_resolver.get_ct_type_or_default('${c.comptime.comptime_for_variant_var}.typ',
+			ast.void_type)
 	}
 	mut from_type := c.unwrap_generic(node.expr_type)
 	from_sym := c.table.sym(from_type)
@@ -3960,7 +3970,7 @@ fn (mut c Checker) ident(mut node ast.Ident) ast.Type {
 	// second use
 	if node.kind in [.constant, .global, .variable] {
 		info := node.info as ast.IdentVar
-		typ := c.comptime.get_type_or_default(node, info.typ)
+		typ := c.type_resolver.get_type_or_default(node, info.typ)
 		// Got a var with type T, return current generic type
 		if node.or_expr.kind != .absent {
 			if !typ.has_flag(.option) {
@@ -4661,6 +4671,11 @@ fn (mut c Checker) prefix_expr(mut node ast.PrefixExpr) ast.Type {
 	right_type := c.expr(mut node.right)
 	c.inside_ref_lit = old_inside_ref_lit
 	node.right_type = right_type
+	mut expr := node.right
+	// if ParExpr get the innermost expr
+	for mut expr is ast.ParExpr {
+		expr = expr.expr
+	}
 	if node.op == .amp {
 		if node.right is ast.Nil {
 			c.error('invalid operation: cannot take address of nil', node.right.pos())
@@ -4668,6 +4683,10 @@ fn (mut c Checker) prefix_expr(mut node ast.PrefixExpr) ast.Type {
 		if mut node.right is ast.PrefixExpr {
 			if node.right.op == .amp {
 				c.error('unexpected `&`, expecting expression', node.right.pos)
+			}
+		} else if mut expr is ast.PrefixExpr {
+			if expr.op == .amp {
+				c.error('cannot take the address of this expression', expr.pos)
 			}
 		} else if mut node.right is ast.SelectorExpr {
 			if node.right.expr.is_literal() {
@@ -4694,11 +4713,6 @@ fn (mut c Checker) prefix_expr(mut node ast.PrefixExpr) ast.Type {
 	// TODO: testing ref/deref strategy
 	right_is_ptr := right_type.is_ptr()
 	if node.op == .amp && (!right_is_ptr || (right_is_ptr && node.right is ast.CallExpr)) {
-		mut expr := node.right
-		// if ParExpr get the innermost expr
-		for mut expr is ast.ParExpr {
-			expr = expr.expr
-		}
 		if expr in [ast.BoolLiteral, ast.CallExpr, ast.CharLiteral, ast.FloatLiteral, ast.IntegerLiteral,
 			ast.InfixExpr, ast.StringLiteral, ast.StringInterLiteral] {
 			c.error('cannot take the address of ${expr}', node.pos)
@@ -5553,12 +5567,33 @@ fn (c &Checker) check_import_sym_conflict(ident string) bool {
 	return false
 }
 
-pub fn (mut c Checker) update_unresolved_return_sizes() {
-	for mut fun in c.unresolved_return_size {
-		ret_sym := c.table.sym(fun.return_type)
-		if ret_sym.info is ast.ArrayFixed && c.array_fixed_has_unresolved_size(ret_sym.info) {
-			mut size_expr := ret_sym.info.size_expr
-			fun.return_type = c.eval_array_fixed_sizes(mut size_expr, 0, ret_sym.info.elem_type)
+// update_unresolved_fixed_sizes updates the unresolved type symbols for array fixed return type and alias type
+pub fn (mut c Checker) update_unresolved_fixed_sizes() {
+	for mut stmt in c.unresolved_fixed_sizes {
+		if mut stmt is ast.FnDecl { // return types
+			ret_sym := c.table.sym(stmt.return_type)
+			if ret_sym.info is ast.ArrayFixed && c.array_fixed_has_unresolved_size(ret_sym.info) {
+				mut size_expr := ret_sym.info.size_expr
+				stmt.return_type = c.eval_array_fixed_sizes(mut size_expr, 0, ret_sym.info.elem_type)
+			}
+		} else if mut stmt is ast.TypeDecl { // alias
+			mut alias_decl := stmt
+			if mut alias_decl is ast.AliasTypeDecl {
+				alias_sym := c.table.sym(alias_decl.parent_type)
+				if alias_sym.info is ast.ArrayFixed
+					&& c.array_fixed_has_unresolved_size(alias_sym.info) {
+					mut size_expr := alias_sym.info.size_expr
+					alias_decl.parent_type = c.eval_array_fixed_sizes(mut size_expr, 0,
+						alias_sym.info.elem_type)
+
+					// overwriting current alias type
+					mut typ_sym := c.table.type_symbols[alias_decl.typ.idx()]
+					typ_sym.parent_idx = alias_decl.parent_type.idx()
+					if mut typ_sym.info is ast.Alias {
+						typ_sym.info.parent_type = alias_decl.parent_type
+					}
+				}
+			}
 		}
 	}
 }

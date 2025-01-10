@@ -18,6 +18,13 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		c.expected_type = chan_info.elem_type
 	}
 
+	if !node.left_ct_expr && !node.left.is_literal() {
+		node.left_ct_expr = c.comptime.is_comptime(node.left)
+	}
+	if !node.right_ct_expr && !node.right.is_literal() {
+		node.right_ct_expr = c.comptime.is_comptime(node.right)
+	}
+
 	// `if n is ast.Ident && n.is_mut { ... }`
 	if !c.inside_sql && node.op == .and {
 		mut left_node := node.left
@@ -538,8 +545,7 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 			}
 			if left_sym.kind in [.array, .array_fixed] && right_sym.kind in [.array, .array_fixed] {
 				c.error('only `==` and `!=` are defined on arrays', node.pos)
-			} else if left_sym.kind == .struct
-				&& (left_sym.info as ast.Struct).generic_types.len > 0 {
+			} else if left_sym.info is ast.Struct && left_sym.info.generic_types.len > 0 {
 				node.promoted_type = ast.bool_type
 				return ast.bool_type
 			} else if left_sym.kind == .struct && right_sym.kind == .struct && node.op in [.eq, .lt] {
@@ -763,7 +769,8 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 				}
 				ast.Ident {
 					if right_expr.name == c.comptime.comptime_for_variant_var {
-						c.comptime.type_map['${c.comptime.comptime_for_variant_var}.typ']
+						c.type_resolver.get_ct_type_or_default('${c.comptime.comptime_for_variant_var}.typ',
+							ast.void_type)
 					} else {
 						c.error('invalid type `${right_expr}`', right_expr.pos)
 						ast.no_type
@@ -793,7 +800,8 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 					c.error('`${op}` can only be used with interfaces and sum types',
 						node.pos) // can be used in sql too, but keep err simple
 				} else if mut left_sym.info is ast.SumType {
-					if typ !in left_sym.info.variants {
+					if typ !in left_sym.info.variants
+						&& c.unwrap_generic(typ) !in left_sym.info.variants {
 						c.error('`${left_sym.name}` has no variant `${right_sym.name}`',
 							right_pos)
 					}
@@ -874,10 +882,8 @@ fn (mut c Checker) infix_expr(mut node ast.InfixExpr) ast.Type {
 		// TODO: broken !in
 		c.error('string types only have the following operators defined: `==`, `!=`, `<`, `>`, `<=`, `>=`, and `+`',
 			node.pos)
-	} else if left_sym.kind == .enum && right_sym.kind == .enum && !eq_ne {
-		left_enum := left_sym.info as ast.Enum
-		right_enum := right_sym.info as ast.Enum
-		if left_enum.is_flag && right_enum.is_flag {
+	} else if !eq_ne && mut left_sym.info is ast.Enum && mut right_sym.info is ast.Enum {
+		if left_sym.info.is_flag && right_sym.info.is_flag {
 			// `@[flag]` tagged enums are a special case that allow also `|` and `&` binary operators
 			if node.op !in [.pipe, .amp, .xor, .bit_not] {
 				c.error('only `==`, `!=`, `|`, `&`, `^` and `~` are defined on `@[flag]` tagged `enum`, use an explicit cast to `int` if needed',

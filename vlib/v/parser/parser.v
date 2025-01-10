@@ -1303,7 +1303,7 @@ fn (mut p Parser) asm_stmt(is_top_level bool) ast.AsmStmt {
 	}
 
 	mut local_labels := []string{}
-	// riscv: https://github.com/jameslzhu/riscv-card/blob/master/riscv-card.pdf
+	// riscv: https://github.com/jameslzhu/riscv-card/releases/download/latest/riscv-card.pdf
 	// x86: https://www.felixcloutier.com/x86/
 	// arm: https://developer.arm.com/documentation/dui0068/b/arm-instruction-reference
 	mut templates := []ast.AsmTemplate{}
@@ -2719,10 +2719,23 @@ fn (mut p Parser) name_expr() ast.Expr {
 		if is_option {
 			map_type = map_type.set_flag(.option)
 		}
-		return ast.MapInit{
+		node = ast.MapInit{
 			typ: map_type
 			pos: pos
 		}
+		if p.tok.kind == .lpar {
+			// ?map[int]int(none) cast expr
+			p.check(.lpar)
+			expr := p.expr(0)
+			p.check(.rpar)
+			return ast.CastExpr{
+				typ:     map_type
+				typname: p.table.sym(map_type).name
+				expr:    expr
+				pos:     pos.extend(p.tok.pos())
+			}
+		}
+		return node
 	}
 	// `chan typ{...}`
 	if p.tok.lit == 'chan' {

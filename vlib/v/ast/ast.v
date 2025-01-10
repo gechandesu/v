@@ -205,6 +205,7 @@ pub:
 pub const empty_expr = Expr(EmptyExpr(0))
 pub const empty_stmt = Stmt(EmptyStmt{})
 pub const empty_node = Node(EmptyNode{})
+pub const empty_comptime_const_value = ComptTimeConstValue(EmptyExpr(0))
 
 // `{stmts}` or `unsafe {stmts}`
 pub struct Block {
@@ -398,7 +399,7 @@ pub mut:
 	end_comments []Comment // comments that after const field
 	// the comptime_expr_value field is filled by the checker, when it has enough
 	// info to evaluate the constant at compile time
-	comptime_expr_value ComptTimeConstValue = empty_comptime_const_expr()
+	comptime_expr_value ComptTimeConstValue = empty_comptime_const_value
 }
 
 // const declaration
@@ -423,22 +424,21 @@ pub:
 	generic_types []Type
 	is_pub        bool
 	// _pos fields for vfmt
-	mut_pos      int = -1 // mut:
-	pub_pos      int = -1 // pub:
-	pub_mut_pos  int = -1 // pub mut:
-	global_pos   int = -1 // __global:
-	module_pos   int = -1 // module:
-	language     Language
-	is_union     bool
-	attrs        []Attr
-	pre_comments []Comment
-	end_comments []Comment
-	embeds       []Embed
-
+	mut_pos          int = -1 // mut:
+	pub_pos          int = -1 // pub:
+	pub_mut_pos      int = -1 // pub mut:
+	global_pos       int = -1 // __global:
+	module_pos       int = -1 // module:
+	is_union         bool
+	attrs            []Attr
+	pre_comments     []Comment
+	end_comments     []Comment
+	embeds           []Embed
 	is_implements    bool
 	implements_types []TypeNode
 pub mut:
-	fields []StructField
+	language Language
+	fields   []StructField
 }
 
 pub struct Embed {
@@ -521,6 +521,7 @@ pub mut:
 	has_update_expr      bool // has `...a`
 	init_fields          []StructInitField
 	generic_types        []Type
+	language             Language
 }
 
 pub enum StructInitKind {
@@ -1132,9 +1133,11 @@ pub mut:
 	or_block      OrExpr
 
 	ct_left_value_evaled  bool
-	ct_left_value         ComptTimeConstValue = empty_comptime_const_expr()
+	ct_left_value         ComptTimeConstValue = empty_comptime_const_value
+	left_ct_expr          bool // true when left is comptime/generic expr
 	ct_right_value_evaled bool
-	ct_right_value        ComptTimeConstValue = empty_comptime_const_expr()
+	ct_right_value        ComptTimeConstValue = empty_comptime_const_value
+	right_ct_expr         bool // true when right is comptime/generic expr
 
 	before_op_comments []Comment
 	after_op_comments  []Comment
@@ -1451,13 +1454,14 @@ pub:
 
 pub struct AliasTypeDecl {
 pub:
-	name        string
-	is_pub      bool
-	typ         Type
+	name     string
+	is_pub   bool
+	typ      Type
+	pos      token.Pos
+	type_pos token.Pos
+	comments []Comment
+pub mut:
 	parent_type Type
-	pos         token.Pos
-	type_pos    token.Pos
-	comments    []Comment
 }
 
 // SumTypeDecl is the ast node for `type MySumType = string | int`
@@ -1994,6 +1998,8 @@ pub mut:
 	left_type  Type
 	field_expr Expr
 	typ        Type
+	is_name    bool   // true if f.$(field.name)
+	typ_key    string // `f.typ` cached key for type resolver
 }
 
 @[minify]

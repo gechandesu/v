@@ -46,7 +46,7 @@ fn (mut g Gen) array_init(node ast.ArrayInit, var_name string) {
 		}
 		for i, expr in node.exprs {
 			if node.expr_types[i] == ast.string_type
-				&& expr !in [ast.StringLiteral, ast.StringInterLiteral] {
+				&& expr !in [ast.IndexExpr, ast.CallExpr, ast.StringLiteral, ast.StringInterLiteral, ast.InfixExpr] {
 				g.write('string_clone(')
 				g.expr(expr)
 				g.write(')')
@@ -474,8 +474,15 @@ fn (mut g Gen) gen_array_map(node ast.CallExpr) {
 		g.past_tmp_var_done(past)
 	}
 
-	ret_styp := g.styp(node.return_type)
-	ret_sym := g.table.final_sym(node.return_type)
+	return_type := if g.type_resolver.is_generic_expr(node.args[0].expr) {
+		ast.new_type(g.table.find_or_register_array(g.type_resolver.unwrap_generic_expr(node.args[0].expr,
+			node.return_type)))
+	} else {
+		node.return_type
+	}
+	ret_styp := g.styp(return_type)
+	ret_sym := g.table.final_sym(return_type)
+
 	left_is_array := g.table.final_sym(node.left_type).kind == .array
 	inp_sym := g.table.final_sym(node.receiver_type)
 
@@ -574,7 +581,7 @@ fn (mut g Gen) gen_array_map(node ast.CallExpr) {
 		ast.CastExpr {
 			// value.map(Type(it)) when `value` is a comptime var
 			if expr.expr is ast.Ident && node.left is ast.Ident && node.left.ct_expr {
-				ctyp := g.comptime.get_type(node.left)
+				ctyp := g.type_resolver.get_type(node.left)
 				if ctyp != ast.void_type {
 					expr.expr_type = g.table.value_type(ctyp)
 				}
@@ -607,6 +614,13 @@ fn (mut g Gen) gen_array_map(node ast.CallExpr) {
 				}
 				g.expr(expr)
 			}
+		}
+		ast.AsCast {
+			if expr.typ.has_flag(.generic) {
+				ret_elem_styp = g.styp(g.unwrap_generic(expr.typ))
+			}
+			g.write('${ret_elem_styp} ${tmp_map_expr_result_name} = ')
+			g.expr(expr)
 		}
 		else {
 			if closure_var_decl != '' {
@@ -1021,12 +1035,14 @@ fn (mut g Gen) gen_array_insert(node ast.CallExpr) {
 		g.expr(node.args[1].expr)
 		g.write('.len)')
 	} else {
+		needs_clone := left_info.elem_type == ast.string_type
+			&& node.args[1].expr !in [ast.IndexExpr, ast.CallExpr, ast.StringLiteral, ast.StringInterLiteral, ast.InfixExpr]
 		g.write(', &(${elem_type_str}[]){')
-		if left_info.elem_type == ast.string_type {
+		if needs_clone {
 			g.write('string_clone(')
 		}
 		g.expr_with_cast(node.args[1].expr, node.args[1].typ, left_info.elem_type)
-		if left_info.elem_type == ast.string_type {
+		if needs_clone {
 			g.write(')')
 		}
 		g.write('})')
