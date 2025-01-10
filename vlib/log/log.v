@@ -26,6 +26,8 @@ pub enum TimeFormat {
 	tf_custom_format // 'MMMM Do YY N kk:mm:ss A' output like: January 1st 22 AD 13:45:33 PM
 }
 
+const stderr = os.stderr()
+
 // Log represents a logging object
 pub struct Log {
 mut:
@@ -37,7 +39,7 @@ mut:
 	custom_time_format string     = 'MMMM Do YY N kk:mm:ss A' // timestamp with custom format
 	short_tag          bool
 	always_flush       bool // flush after every single .fatal(), .error(), .warn(), .info(), .debug() call
-	output_stream      io.Writer = os.stderr()
+	output_stream      io.Writer = stderr
 pub mut:
 	output_file_name string // log output to this file
 }
