@@ -488,9 +488,17 @@ pub fn (mut d Doc) file_asts(mut file_asts []ast.File) ! {
 		}
 		if d.with_head && i == 0 {
 			mut module_name := file_ast.mod.name
-			// if module_name != 'main' && d.parent_mod_name.len > 0 {
-			// 	module_name = d.parent_mod_name + '.' + module_name
-			// }
+			// Ensure to submodule name is correct if source code is placed into ./src dir and
+			// `v doc` is called in dir that contains the 'src' dir, i.e. produce name
+			// 'mymod.submod' instead of 'src.submod' for submodule placed in ./src/submod
+			if module_name.starts_with('src.') && os.is_dir('src') {
+				parent_mod_name_parts := d.parent_mod_name.split('.')
+				mod_name_parts := module_name.split('.')
+				if parent_mod_name_parts.len != mod_name_parts.len {
+					module_name = parent_mod_name_parts.join('.') + '.' +
+						mod_name_parts[parent_mod_name_parts.len..].join('.')
+				}
+			}
 			d.head = DocNode{
 				name:    module_name
 				content: 'module ${module_name}'

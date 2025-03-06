@@ -49,7 +49,12 @@ fn get_parent_mod(input_dir string) !string {
 	}
 	parent_mod := get_parent_mod(base_dir) or { return input_dir_name }
 	if parent_mod.len > 0 {
-		return '${parent_mod}.${file_ast.mod.name}'
+		mut mod_name := file_ast.mod.name
+		if mod_name.starts_with('src.') && os.is_dir('src') {
+			// omit 'src.' if source code is placed into ./src dir
+			return parent_mod + '.' + mod_name.all_after('.')
+		}
+		return parent_mod + '.' + mod_name
 	}
 	return file_ast.mod.name
 }
